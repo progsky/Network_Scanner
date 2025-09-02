@@ -3,6 +3,7 @@ import argparse
 import csv
 import json
 import sys
+import ipaddress
 from concurrent.futures import ThreadPoolExecutor
 
 import scapy.all as scapy
@@ -21,16 +22,25 @@ BANNER = r"""
            FAST  ARP  SCANNER
 """
 
+def detect_local_subnet():
+    """Try to detect the local subnet automatically."""
+    try:
+        iface = scapy.conf.iface
+        ip = scapy.get_if_addr(iface)
+        mask = scapy.get_if_netmask(iface)
+        network = ipaddress.IPv4Network(f"{ip}/{mask}", strict=False)
+        return str(network)
+    except Exception:
+        return None
+
 def scan(ip: str):
-    """Send ARP requests to the given IP or range and return a list of devices."""
     arp_request = scapy.ARP(pdst=ip)
     broadcast = scapy.Ether(dst="ff:ff:ff:ff:ff:ff")
     arp_request_broadcast = broadcast / arp_request
-    answered, _ = scapy.srp(arp_request_broadcast, timeout=3, verbose=False)
+    answered, _ = scapy.srp(arp_request_broadcast, timeout=2, verbose=False)
     return [{"ip": e[1].psrc, "mac": e[1].hwsrc} for e in answered]
 
 def print_result(results: list, output_format: str):
-    """Print scan results in the chosen format."""
     if not results:
         print(Fore.RED + "[-] No devices found")
         return
@@ -45,11 +55,10 @@ def print_result(results: list, output_format: str):
         writer.writerows(results)
 
 def get_arguments():
-    """Parse CLI arguments."""
     parser = argparse.ArgumentParser(description="Fast ARP network scanner")
     parser.add_argument(
-        "-t", "--target", required=True,
-        help="Target IP / IP range (e.g. 192.168.0.1/24)"
+        "-t", "--target",
+        help="Target IP / IP range (e.g. 192.168.0.1/24 or multiple separated by commas). If omitted, local subnet will be used."
     )
     parser.add_argument(
         "-f", "--format", choices=["table", "json", "csv"],
@@ -62,7 +71,6 @@ def get_arguments():
     return parser.parse_args()
 
 def parallel_scan(targets: list, threads: int):
-    """Run scans in parallel for multiple targets."""
     with ThreadPoolExecutor(max_workers=threads) as executor:
         results = []
         for res in executor.map(scan, targets):
@@ -72,7 +80,17 @@ def parallel_scan(targets: list, threads: int):
 def main():
     print(Fore.CYAN + BANNER + Style.RESET_ALL)
     args = get_arguments()
-    targets = [args.target]
+
+    if args.target:
+        targets = [t.strip() for t in args.target.split(",") if t.strip()]
+    else:
+        local_net = detect_local_subnet()
+        if not local_net:
+            print(Fore.RED + "[-] Could not detect local subnet. Please specify -t.")
+            sys.exit(1)
+        print(Fore.YELLOW + f"[i] Using detected local subnet: {local_net}")
+        targets = [local_net]
+
     results = parallel_scan(targets, args.parallel)
     print_result(results, args.format)
 
